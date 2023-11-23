@@ -77,7 +77,7 @@ def dfChains(roots,models,chainDir,burnin,stacked=True,nmax='all'):
         chains = []
         for file in chainPath.iterdir():
             if (r in str(file) and '.txt' in str(file)
-                and 'minimum' not in str(file))
+                and 'minimum' not in str(file)
                 and r == str(file)[len(chainDir):len(chainDir)+len(r)]):
                 # print('\tFile:',file)
                 
