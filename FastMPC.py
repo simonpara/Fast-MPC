@@ -313,7 +313,8 @@ def reweight(chains,model_posts):
         # print(m)
         # print(chains[m])
         N = len(chains[m]) # number of samples 
-        weights = [model_posts[m]*chains[m]['weight'][n] for n in range(N)] 
+        # weights = [model_posts[m]*chains[m]['weight'][n] for n in range(N)] 
+        weights = [((N*0.1)/N)*model_posts[m]*chains[m]['weight'][n] for n in range(N)] 
             # weight every sample by the model posterior times the Cobaya weight
         editchain = deepcopy(chains[m])
         # print(editchain)
