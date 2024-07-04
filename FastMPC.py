@@ -23,10 +23,11 @@ import pandas as pd
 import scipy.stats as st
 import math
 import statsmodels.stats.weightstats as ssw
+import harmonic as hm
 
 from copy import deepcopy
 import time
-import os
+import sys,os
 import pathlib
 
 import seaborn as sns
@@ -73,19 +74,18 @@ def dfChains(roots,models,chainDir,burnin,stacked=True,nmax='all'):
     chainPath = pathlib.Path(chainDir) # turn chain directory into path object
     
     for k,r in enumerate(roots):
-        print('Root:',r)
+        print('Root:',r,models[k])
         chains = []
         for file in chainPath.iterdir():
+            #print(r,str(file)[len(chainDir):len(chainDir)+len(r)])
             if (r in str(file) and '.txt' in str(file)
                 and 'minimum' not in str(file)
                 and r == str(file)[len(chainDir):len(chainDir)+len(r)]):
-                # print('\tFile:',file)
-                
+                #print('\tFile:',file)
                 # Read header from file
                 f = open(file,'r')
                 for line in f:
                     split = line.split(' ')
-                    # print(split)
                     for i,el in enumerate(split):
                         if '\n' in el:
                             split[i] = el.replace('\n','')
@@ -107,6 +107,101 @@ def dfChains(roots,models,chainDir,burnin,stacked=True,nmax='all'):
                 # Create DataFrame 
                 # print(header)
                 samples = pd.DataFrame(data,columns=header)
+                
+                # Remove burn-in
+                if burnin[k] < 1:
+                    burnin_ind = int(burnin[k]*len(samples))
+                else:
+                    burnin_ind = int(burnin[k])
+                if nmax == 'all' or nmax == 1:
+                    burned_samples = samples.loc[burnin_ind:]
+                else:
+                    burned_samples = samples.loc[burnin_ind:]
+                    max_index = int(len(burned_samples)*nmax)
+                    burned_samples = burned_samples[:max_index]
+                
+                chains.append(deepcopy(burned_samples))
+                    
+        # print(stacked)
+        if stacked:
+            # Stack chains for each model
+            stacked_chains = pd.concat(chains,ignore_index=True)
+            all_chains[models[k]] = stacked_chains
+        else:
+            # Return each chain independently
+            all_chains[models[k]] = chains
+            
+    # print(time.time()-start,'s')
+                
+    return all_chains
+
+# Function to calculate likelihoods from chain data: -log(posterior)s and 
+## -log(prior)s
+
+# Function to load chains into pandas DataFrame
+def dfChains_cosmomc(roots,models,chainDir,burnin,stacked=True,nmax='all'):
+    '''
+    Loads cosmomc chains into DataFrame structures with the appropriate 
+    column headers and returns a dictionary containing the chains corresponding
+    to each root provided.
+
+    Parameters
+    ----------
+    roots : list of str
+        Root names of chains to load.
+    models : list of str
+        Names of models corresponding to 'roots'.
+    chainDir : str
+        Chain directory from which to retrieve chains.
+    burnin : list of float or int
+        List of fractional burn-in OR number of burn-in samples to remove from 
+        chains.
+    stacked : bool, optional
+        If True, return all chains stacked together for each root. The default
+        value is True.
+    nmax : either 1, 'all' or a fraction 0<=nmax<=1
+        The fraction of the total chains' length to use (after burn-in has been removed)
+
+    Returns
+    -------
+    all_chains : dict of DataFrames
+        Each key is a root file name, and its corresponding entry is the 
+        chains of that root.
+
+    '''
+    
+    # start = time.time()
+    all_chains = {}
+    chainPath = pathlib.Path(chainDir) # turn chain directory into path object
+    header = []
+
+    for k,r in enumerate(roots):
+        for file in chainPath.iterdir():
+            if (r in str(file) and r == str(file)[len(chainDir):len(chainDir)+len(r)]
+                 and '.paramnames' in str(file)):
+                f = open(file,'r')
+                lines=f.readlines()
+                result=[]
+                for x in lines:
+                    result.append(x.split()[0])
+                f.close()
+                result = np.insert(result,0,'minusloglike')
+                result = np.insert(result,0,'weight')
+                header.append(result)
+    for k,r in enumerate(roots):
+        print('Root:',k,r)
+        r+='_'
+        chains = []
+        for file in chainPath.iterdir():
+            if (r in str(file) and r == str(file)[len(chainDir):len(chainDir)+len(r)] 
+                and '.txt' in str(file)):
+                # Load data
+                data = np.loadtxt(file)
+                # print(data)
+                
+                # Create DataFrame 
+                # print(header)
+                samples = pd.DataFrame(data,columns=header[k])
                 
                 # Remove burn-in
                 if burnin[k] < 1:
@@ -162,11 +257,71 @@ def get_lik(chains,stacked=True):
     # 'minuslogprior__0' is the separable joint prior over all parameters
     minuslogliks = {}
     for m in chains:
+        # print('getting likelihood from logpost: ',m)
         # m = model name
         if stacked:
+            #print(m, np.mean(chains[m]['minuslogpost']), np.mean(chains[m]['minuslogprior']))
             minusloglik = chains[m]['minuslogpost'] - chains[m]['minuslogprior']
         else:
             minusloglik = [s['minuslogpost'] - s['minuslogprior'] for s in 
+                           chains[m]]
+        minuslogliks[m] = minusloglik
+    
+    # Get common normalization factor
+    mins_m = {}
+    mins = []
+    for m in minuslogliks:
+        if stacked:
+            mins.append(np.amin(minuslogliks[m]))
+            mins_m[m] = np.amin(minuslogliks[m])
+        else:
+            for s in minuslogliks[m]:
+                mins.append(np.amin(s))
+    minlik = max(mins) # absolute minimum over all chains
+    #minlik = np.mean(mins)    
+
+    # Compute likelihoods
+    if stacked:
+        likelihoods = {m:np.exp(-(minuslogliks[m] - minlik)) for m in minuslogliks}
+    else:
+        likelihoods = {}
+        for m in minuslogliks:
+            liks = [np.exp(-(s - minlik)) for s in minuslogliks[m]]
+            likelihoods[m] = liks
+    
+    return likelihoods
+        
+# Function to compute model likelihoods
+def get_lik_cosmomc(chains,stacked=True):
+    '''
+    for cosmomc files extracts the minusloglike column and rearranges 
+    properly
+
+    Parameters
+    ----------
+    chains : dict of DataFrame
+        Contains MCMC samples with -log(posterior) and -log(prior) values
+        for the joint distributions. The keys are the model names.
+    stacked : bool, optional
+        If True, the loaded chains are stacked for each model. If False, each
+        chain was loaded separately. The default is True.
+
+    Returns
+    -------
+    likelihoods : dict of Series
+        Joint likelihood values for MCMC samples for each set of chains.
+
+    '''
+    
+    # Calculate -log(likelihood)s
+    # 'minuslogprior__0' is the separable joint prior over all parameters
+    minuslogliks = {}
+    for m in chains:
+        # m = model name
+        if stacked:
+            minusloglik = chains[m]['minusloglike'] 
+        else:
+            minusloglik = [s['minusloglike'] for s in 
                            chains[m]]
         minuslogliks[m] = minusloglik
     
@@ -192,10 +347,12 @@ def get_lik(chains,stacked=True):
     return likelihoods
         
 # Function to compute model likelihoods
-def model_lik(likelihoods,stacked=True):
+
+def model_lik(likelihoods,stacked=True,return_stats=False):
     '''
     Computes the estimate of the likelihood of the model which the MCMC data
-    depend on given the likelihood associated with that model.
+    depend on given the likelihood associated with that model using the
+    standard harmonic mean estimator.
 
     Parameters
     ----------
@@ -205,14 +362,20 @@ def model_lik(likelihoods,stacked=True):
     stacked : bool, optional
         If True, the loaded chains are stacked for each model. If False, each
         chain was loaded separately. The default is True.
+    return_stats: bool, optional
+        False by default. If True, the function returns the variance associated
+        to the estimator.
 
     Returns
     -------
     mliks : dict of float
-        Estimate of model likelihood for each model.
-
+        Estimate of model likelihood for each model. If return_stats=True
+        it returns mliks, var
     '''
     
+    like_mean = {}
+    like_var = {}
+
     mliks = {}
     for m in likelihoods:
         # m = model name
@@ -223,11 +386,24 @@ def model_lik(likelihoods,stacked=True):
         
             insum = [1/likelihoods[m][i] for i in inds]
             infcount = insum.count(np.inf) # happens if likelihood = 0
+            if infcount!=0:
+                print('Warning: infcount=',infcount)
             # print(infcount/N)
             for i in range(infcount):
                 insum.remove(np.inf)
             mlik = (N-infcount)/np.sum(1/likelihoods[m][:])
             mliks[m] = mlik
+            frac = 0.99
+            frac_jk = int(N*frac)
+            rm_jk = int(N*(1-frac))
+            n_jk = round(1/(1-frac))
+            dumb = np.zeros(n_jk)
+            shuffled = np.copy(likelihoods[m])
+            for i in range(n_jk):
+                idx_rm   = np.arange(i*rm_jk,(i+1)*rm_jk)
+                tmp_del  = np.delete(shuffled, idx_rm)
+                dumb[i]  = frac_jk/np.sum(1./tmp_del)
+            like_var[m]  = np.var(dumb,ddof=1)
         else:
             liks = []
             for s in likelihoods[m]:
@@ -237,6 +413,8 @@ def model_lik(likelihoods,stacked=True):
             
                 insum = [1/s[i] for i in inds]
                 infcount = insum.count(np.inf) # happens if likelihood = 0
+                if infcount!=0:
+                    print('Warning: infcount=',infcount)
                 # print(infcount/N)
                 for i in range(infcount):
                     insum.remove(np.inf)
@@ -245,10 +423,99 @@ def model_lik(likelihoods,stacked=True):
         
             mliks[m] = np.mean(liks) # average likelihood over all chains
     
-    return mliks
+    if return_stats == True:
+        return mliks, like_var
+    else:  
+        return mliks
+
+def lhm_model_lik(chains,pars,stacked=True,return_stats=False):
+    '''
+    Computes the estimate of the likelihood of the model which the MCMC data
+    depend on given the likelihood associated with that model. It implements the 
+    ML trained harmonic mean instead of the standard one
+
+    Parameters
+    ----------
+    likelihoods : dict of Series
+        Contains joint likelihood values corresponding to MCMC samples for 
+        each model.
+    stacked : bool, optional
+        If True, the loaded chains are stacked for each model. If False, each
+        chain was loaded separately. The default is True.
+    return_stats: bool, optional
+        False by default. If True, the function returns the variance associated
+        to the estimator.
+    
+    Returns
+    -------
+    mliks : dict of float
+        Estimate of model likelihood for each model. If return_stats==True
+        the function returns: mliks, var
+
+    '''
+    
+    mliks = {}
+    error = {}
+    mins = []
+    for m in chains:
+        if stacked:
+            mins.append(np.amin(chains[m]['minuslogpost']- chains[m]['minuslogprior']))
+        else:
+            print('modified hamornic mean only works with stacked=True')
+            exit
+    minlik = max(mins) 
+
+    nsplits = 8
+    for m in chains:
+        # m = model name
+        # print(likelihoods[m])
+        if stacked:
+            N = len(chains[m]['minuslogpost']) # number of samples
+            split = int(N/nsplits)
+            ndim = len(pars[m])
+            print('Computing evidence for model: ',m)
+            #print(pars[m],ndim)
+
+            samples = np.zeros((nsplits,split,ndim))
+            lnlike = np.zeros((nsplits,split))
+
+            i = 0
+            for name in pars[m]:
+                tmp = chains[m][name].values
+                #print(pars[m][i],chains[m][pars[m][i]].values)
+                for j in range(nsplits):
+                    samples[j,:,i] = tmp[split*j:split*(j+1)]
+                i += 1
+            
+            lnpost = -(chains[m]['minuslogpost'] - chains[m]['minuslogprior'] - minlik)
+            for j in range(nsplits):
+                lnlike[j,:]  = lnpost[split*j:split*(j+1)]
+                #print(np.mean(lnlike[j,:]))
+            harm_chains = hm.Chains(ndim)
+            harm_chains.add_chains_3d(samples, lnlike)
+
+            chains_train, chains_infer = hm.utils.split_data(harm_chains, training_proportion=0.2)
+            model = hm.model.RealNVPModel(ndim, learning_rate=0.01,
+                                        standardize=True, temperature=0.8)
+            #model = hm.model.RQSplineModel(ndim, learning_rate=0.005, standardize=True, temperature=0.8)
+            epochs_num = 3
+            model.fit(chains_train.samples, epochs=epochs_num, verbose=False)
+            ev = hm.Evidence(chains_infer.nchains, model)
+            ev.add_chains(chains_infer)
+            evidence, std = ev.compute_evidence()
+            mliks[m] = evidence
+            error[m] = std**2
+        else:
+            print('modified hamornic mean only works with stacked=True')
+            exit
+    
+    if return_stats == True:
+        return mliks, error
+    else:
+        return mliks
 
 # Function to compute model posteriors
-def model_post(models,model_liks,priors):
+def model_post(models,model_liks,priors,varlike=None):
     '''
     Computes the model posteriors for each model that corresponds to the 
     likelihoods and priors passed.
@@ -262,16 +529,20 @@ def model_post(models,model_liks,priors):
         samples.
     priors : dict of float
         Contains the prior for each model, as specified by user.
+    varlike : None or dict of floats.
+        If None (default) posts_err are set to 0. Otherwise it reads
+        the uncertainties associated to the estimators to propagate
+        those to the final model posterior.
 
     Returns
     -------
-    posts : dict of float
-        Contains posterior probability for each model.
+    posts, posts_err : dict of float
+        Contains posterior probability for each model and errors on it
 
     '''
     
     posts = {} # model posteriors
-    
+
     # Compute normalization
     arr_liks = np.array(list(model_liks.values())) # for nice math
     arr_priors = np.array(list(priors.values()))
@@ -281,8 +552,25 @@ def model_post(models,model_liks,priors):
     for m in models:
         mpost = model_liks[m]*priors[m]/sumposts
         posts[m] = mpost
-        
-    return posts
+    
+    post_err = {}
+    if varlike != None:
+        for j in models:
+            x = 0
+            for k in models:
+                if k == j:
+                    tmp = models[:]
+                    tmp.remove(k)
+                    for m in tmp:
+                        x += (posts[m]*priors[m]/sumposts)**2 * varlike[k]
+                else:
+                    x += (posts[j]*priors[j]/sumposts)**2 * varlike[k]
+            post_err[j] = np.sqrt(x)
+    else:
+        for j in models:
+            post_err[j] = 0
+
+    return posts, post_err
 
 # Get reweighted chains
 def reweight(chains,model_posts):
@@ -314,7 +602,7 @@ def reweight(chains,model_posts):
         # print(chains[m])
         N = len(chains[m]) # number of samples 
         weights = [model_posts[m]*chains[m]['weight'][n] for n in range(N)] 
-        #weights = [((N*0.1)/N)*model_posts[m]*chains[m]['weight'][n] for n in range(N)] 
+        # weights = [(N*0.1/N)*model_posts[m]*chains[m]['weight'][n] for n in range(N)] 
             # weight every sample by the model posterior times the Cobaya weight
         editchain = deepcopy(chains[m])
         # print(editchain)
@@ -328,7 +616,9 @@ def reweight(chains,model_posts):
     return newchains
 
 # Run full computation to retrieve original and reweighted chains
-def run(roots,models,chainDir,burnin,priors,temperature):
+def run(roots,models,chainDir,burnin,priors,temperature,cosmomc=False,
+        pars={'LCDM':['logA','ns','r','theta_MC_100','ombh2','omch2','tau']}, 
+        estimator='harmonic'):
     '''
     Computes the model posteriors from the chains given in 'roots', using 
     'burnin' fractional burn-in and the specified model priors, 'priors'.
@@ -348,6 +638,13 @@ def run(roots,models,chainDir,burnin,priors,temperature):
         Model priors for each model in 'models'.
     temperature: dict of float
         Chain temperature - used to retrieve the correct -logP
+    cosmomc: bool
+        whether chain roots are in cosmomc formats (require an .inputparam file too)
+    pars: dict of str
+        list of parameters considered for each model.
+    estimator: str, optional
+        whether to use the standard harmonic estimator or the learnt harmonic estimator.
+        'harmonic' is the default option
 
     Returns
     -------
@@ -370,29 +667,43 @@ def run(roots,models,chainDir,burnin,priors,temperature):
     '''
     
     print('Models:',models)
-    
+
     # Load MCMC samples
     print('\nLoading chains from roots:',roots)
     print('\tUsing burn-in',burnin)
-    chains = dfChains(roots,models,chainDir,burnin) # assume always using stacked chains
-    for m in models:
-        chains[m]['minuslogpost'] *= temperature[m]
+    
+    if cosmomc == False:
+        print('\tUsing Cobaya formatting')
+        chains = dfChains(roots,models,chainDir,burnin) # assume always using stacked chains
+        for m in models:
+            chains[m]['minuslogpost'] *= temperature[m]
+        likelihoods = get_lik(chains)
+    elif cosmomc==True:
+        print('\tUsing CosmoMC formatting')
+        chains = dfChains_cosmomc(roots,models,chainDir,burnin)
+        for m in models:
+            chains[m]['minusloglike'] *= temperature[m]
+        likelihoods = get_lik_cosmomc(chains)
 
     # Compute model likelihoods
     print('Computing model likelihoods')
-    likelihoods = get_lik(chains)
-    model_liks = model_lik(likelihoods)
+    if estimator=='harmonic':
+        model_liks, tmp = model_lik(likelihoods,return_stats=True)
+    elif estimator=='learnt harmonic':
+        model_liks, tmp = lhm_model_lik(chains,pars,return_stats=True)
+    else:
+       sys.exit('error: not a valid estimator. Exiting.') 
     
     # Compute model posteriors
     print('Computing model posteriors')
-    model_posts = model_post(models,model_liks,priors)
-    
+    model_posts, error = model_post(models,model_liks,priors,
+                                        varlike=tmp)
     # Construct reweighted chains
     print('Reweighting chains')
     newchains = reweight(chains,model_posts)
     
     stuff = {'chains':chains,'likelihoods':likelihoods,'model_liks':model_liks,
-             'model_posts':model_posts,'newchains':newchains}
+             'model_posts':model_posts,'newchains':newchains, 'model_posts_error':error}
     
     return stuff
 
@@ -466,7 +777,7 @@ def prior_dependence(model_likelihoods,leg_labs=None,subtitle='',
         model_priors = {models[0]:pr,models[1]:1-pr}
         
         # Compute model posteriors
-        model_posts = model_post(models,model_likelihoods,model_priors)
+        model_posts, err = model_post(models,model_likelihoods,model_priors)
         M1_posts.append(model_posts[models[0]])
         M2_posts.append(model_posts[models[1]])
         
@@ -846,6 +1157,54 @@ def paper_plots(chains,params,models,leg_labs=None,subtitle='',latex=None,
     if showFig:
         plt.show()
     plt.close()
+
+def lnpost_traceplot(roots,models,chainDir,burnin,temperature,nmax='all'):
+
+    '''
+    Plots the logpost traceplot. Usefull to assess burn-in removal from initial chains.
+
+    '''
+
+    # Load chains
+    print('Loading chains')
+    chains = dfChains(roots,models,chainDir,np.zeros(len(models)),stacked=False, nmax=nmax)
+
+    nrows = len(chains)
+    fig, ax = plt.subplots(nrows=nrows,ncols=1,
+                           figsize=(5,int(3*nrows)),layout='tight',squeeze=False)
+
+    minuslogliks = {}
+    for m in chains:
+        minusloglik = [s['minuslogpost'] - s['minuslogprior'] for s in 
+                           chains[m]]
+        minuslogliks[m] = minusloglik
+    
+    # Get common normalization factor
+    mins_m = {}
+    mins = []
+    for m in minuslogliks:
+        for s in minuslogliks[m]:
+            mins.append(np.amin(s))
+    minlik = max(mins) # absolute minimum over all chains
+
+    j = 0
+    for m in models:
+        for i in range(len(chains[m])):
+            chains[m][i]['minuslogpost'] *= temperature[m]
+            N = len(chains[m][i]['minuslogpost'])
+            sample_range = np.arange(1,N+1)
+            ax[j,0].plot(sample_range/N,chains[m][i]['minuslogpost']-
+                         chains[m][i]['minuslogprior']-minlik)
+        ax[j,0].axvline(burnin[j],color='grey',ls='-.')
+        #ax[j,0].set_yscale('log')
+        ax[j,0].set_title(m)
+        ax[j,0].set_ylabel('-lnL - minlike')
+        ax[j,0].set_xlabel('sample')
+        ax[j,0].set_xlim(0,1)
+        j+=1
+    
+
+        
         
 def GRstat_Harmonic_check(roots,models,chainDir,burnin,temperature,prior,Rm1_stop=0.05, out_var=False, nmax='all'):
     '''
@@ -963,7 +1322,7 @@ def GRstat_Harmonic_check(roots,models,chainDir,burnin,temperature,prior,Rm1_sto
         #print(np.mean((1./wcm['LCDM'])/(1./wcm['LCDM']+1./wcm['EDE'])))
         for m in models:
             wc_vars[m].append(wcv[m])
-    #print(wc_vars['LCDM'])
+    print('within-chain variance:',wc_vars['LCDM'])
     
 
     # e) W = mean of within-chain variances
