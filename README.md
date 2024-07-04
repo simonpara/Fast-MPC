@@ -1,5 +1,10 @@
 # Fast-MPC
+
 Fast-MPC is a computational strategy for Bayesian Model Averaging (BMA) that exploits existing MCMC software and combines model-specific posteriors post-hoc.
+
+It is currently only a collection of useful functions, but the long-term plan is to turn it into a proper python package.
+
+It currently implements two different estimators: the standard harmonic mean and the learnt harmonic mean (from https://arxiv.org/abs/2111.12720). You can use either one or the other to evaluate the model marginal posterior distribution.
 
 
 --------------------------------
